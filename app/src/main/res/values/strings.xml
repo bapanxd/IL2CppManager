@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IL2CppManager</string>
+    <string name="theme_preference_save_failed">Theme preference could not be saved.</string>
+</resources>

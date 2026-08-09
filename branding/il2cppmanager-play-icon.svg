@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+    width="512"
+    height="512"
+    viewBox="0 0 512 512">
+    <rect width="512" height="512" fill="#1C1C1E" />
+    <path
+        transform="matrix(6 0 0 6 -68 -62)"
+        fill="#E2E2E4"
+        fill-rule="evenodd"
+        d="M28 27H45L53 35H80Q86 35 86 41V73Q86 79 80 79H28Q22 79 22 73V33Q22 27 28 27ZM49 46L36 55Q34.5 56 36 57L49 66V60L43 56 49 52ZM59 46L72 55Q73.5 56 72 57L59 66V60L65 56 59 52Z" />
+</svg>
