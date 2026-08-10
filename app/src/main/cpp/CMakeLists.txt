@@ -25,6 +25,7 @@ set_target_properties(capstone capstone_static PROPERTIES POSITION_INDEPENDENT_C
 add_library(
     il2cpp_metadata
     STATIC
+    complemented_counted_metadata.cpp
     metadata_parser.cpp
     metadata_search.cpp
 )

@@ -1,5 +1,7 @@
 #include "metadata_parser.h"
 
+#include "complemented_counted_metadata.h"
+
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -196,6 +198,8 @@ struct Schema {
     std::size_t typeDefinitionsSectionIndex;
     std::size_t imagesSectionIndex;
     std::size_t assembliesSectionIndex;
+    bool allowsUnclaimedFields = false;
+    bool allowsUnclaimedParameters = false;
 };
 
 constexpr TypeDefinitionLayout kVersion23Type{
@@ -394,6 +398,132 @@ struct Header {
     Section images;
     Section assemblies;
 };
+
+Section countedSection(const CountedMetadataSection& section) noexcept {
+    return {section.offset, section.size, section.count, true};
+}
+
+Header countedHeader(const ComplementedCountedMetadataInference& inference) noexcept {
+    const auto& sections = inference.sections;
+    Header header;
+    header.strings = countedSection(sections.strings);
+    header.events = countedSection(sections.events);
+    header.properties = countedSection(sections.properties);
+    header.methods = countedSection(sections.methods);
+    header.parameters = countedSection(sections.parameters);
+    header.fields = countedSection(sections.fields);
+    header.genericParameters = countedSection(sections.genericParameters);
+    header.genericParameterConstraints = countedSection(sections.genericParameterConstraints);
+    header.genericContainers = countedSection(sections.genericContainers);
+    header.nestedTypes = countedSection(sections.nestedTypes);
+    header.interfaces = countedSection(sections.interfaces);
+    header.interfaceOffsets = countedSection(sections.interfaceOffsets);
+    header.typeDefinitions = countedSection(sections.typeDefinitions);
+    header.images = countedSection(sections.images);
+    header.assemblies = countedSection(sections.assemblies);
+    return header;
+}
+
+Schema countedSchema(const ComplementedCountedMetadataInference& inference) noexcept {
+    const auto& source = inference.layout;
+    Schema schema{};
+    schema.version = inference.normalizedVersion;
+    schema.supportsRuntimeMetadata = inference.supportsRuntimeMetadata;
+    schema.runtimeTypeByReferenceBit = inference.runtimeTypeByReferenceBit;
+    schema.headerSectionCount = 31;
+    schema.headerSectionSize = 12;
+    schema.type = {
+        source.type.size,
+        source.type.byValueTypeIndex,
+        source.type.declaringTypeIndex,
+        source.type.parentTypeIndex,
+        source.type.genericContainerIndex,
+        source.type.flags,
+        source.type.fieldStart,
+        source.type.methodStart,
+        source.type.eventStart,
+        source.type.propertyStart,
+        source.type.nestedTypeStart,
+        source.type.interfaceStart,
+        source.type.methodCount,
+        source.type.propertyCount,
+        source.type.fieldCount,
+        source.type.eventCount,
+        source.type.nestedTypeCount,
+        source.type.interfaceCount,
+        source.type.bitfield,
+        source.type.token,
+    };
+    schema.method = {
+        source.method.size,
+        source.method.declaringTypeIndex,
+        source.method.returnTypeIndex,
+        source.method.parameterStart,
+        source.method.genericContainerIndex,
+        source.method.token,
+        source.method.flags,
+        source.method.parameterCount,
+    };
+    schema.field = {source.field.size, source.field.typeIndex, source.field.token};
+    schema.parameter = {
+        source.parameter.size,
+        source.parameter.token,
+        source.parameter.typeIndex,
+    };
+    schema.property = {
+        source.property.size,
+        source.property.getterIndex,
+        source.property.setterIndex,
+        source.property.attributes,
+        source.property.token,
+    };
+    schema.event = {
+        source.event.size,
+        source.event.typeIndex,
+        source.event.addIndex,
+        source.event.removeIndex,
+        source.event.raiseIndex,
+        source.event.token,
+    };
+    schema.genericParameter = {
+        source.genericParameter.size,
+        source.genericParameter.ownerIndex,
+        source.genericParameter.nameIndex,
+        source.genericParameter.constraintsStart,
+        source.genericParameter.constraintsCount,
+        source.genericParameter.number,
+        source.genericParameter.flags,
+    };
+    schema.genericContainer = {
+        source.genericContainer.size,
+        source.genericContainer.parameterCount,
+        source.genericContainer.parameterCountSize,
+        source.genericContainer.isMethod,
+        source.genericContainer.isMethodSize,
+        source.genericContainer.parameterStart,
+    };
+    schema.widths = {
+        source.widths.type,
+        source.widths.typeDefinition,
+        source.widths.genericContainer,
+        source.widths.field,
+        source.widths.method,
+        source.widths.event,
+        source.widths.property,
+        source.widths.nestedType,
+        source.widths.interface,
+        source.widths.parameter,
+        source.widths.genericParameter,
+    };
+    schema.image = {source.image.size, source.image.typeStart, source.image.typeCount};
+    schema.assembly = {source.assembly.size, source.assembly.nameIndex};
+    schema.typeDefinitionsSectionIndex = inference.sections.typeDefinitions.directoryIndex;
+    schema.imagesSectionIndex = inference.sections.images.directoryIndex;
+    schema.assembliesSectionIndex = inference.sections.assemblies.directoryIndex;
+    schema.allowsUnclaimedFields = source.allowsUnclaimedFields;
+    schema.allowsUnclaimedParameters = source.allowsUnclaimedParameters;
+    return schema;
+}
 
 struct RawImage {
     std::string name;
@@ -970,14 +1100,11 @@ bool isAcceptedMagic(std::uint32_t magic, bool allowErasedMagic) noexcept {
            (allowErasedMagic && magic == kErasedMetadataMagic);
 }
 
-MetadataParseResult parseSchema(
+MetadataParseResult parseResolvedSchema(
     const std::vector<std::uint8_t>& bytes,
-    const Schema* schema) {
+    const Schema* schema,
+    const Header& header) {
     const ByteView view(bytes);
-    Header header;
-    if (!parseHeader(view, *schema, view.size(), header)) {
-        return malformed(MetadataParseStage::Header);
-    }
 
     SectionCounts counts;
     if (!readSectionCounts(header, *schema, counts)) {
@@ -1511,10 +1638,63 @@ MetadataParseResult parseSchema(
         }
     }
 
+    const auto validateUnclaimedFields = [&]() {
+        if (!schema->allowsUnclaimedFields) {
+            return allClaimed(claimedFields);
+        }
+        for (std::size_t index = 0; index < fieldCount; ++index) {
+            if (claimedFields[index] != 0) {
+                continue;
+            }
+            const auto offset = header.fields.offset + index * schema->field.size;
+            std::int32_t nameIndex = 0;
+            std::int32_t typeIndex = 0;
+            std::uint32_t token = 0;
+            if (!view.readI32(offset, nameIndex) ||
+                !view.readIndex(
+                    offset + schema->field.typeIndex,
+                    schema->widths.type,
+                    typeIndex) ||
+                !view.readU32(offset + schema->field.token, token) ||
+                typeIndex != 0 || token != 0 ||
+                !strings.get(nameIndex)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto validateUnclaimedParameters = [&]() {
+        if (!schema->allowsUnclaimedParameters) {
+            return allClaimed(claimedParameters);
+        }
+        for (std::size_t index = 0; index < parameterCount; ++index) {
+            if (claimedParameters[index] != 0) {
+                continue;
+            }
+            const auto offset = header.parameters.offset + index * schema->parameter.size;
+            std::int32_t nameIndex = 0;
+            std::int32_t typeIndex = 0;
+            std::uint32_t token = 0;
+            if (!view.readI32(offset, nameIndex) ||
+                !view.readU32(offset + schema->parameter.token, token) ||
+                !view.readIndex(
+                    offset + schema->parameter.typeIndex,
+                    schema->widths.type,
+                    typeIndex) ||
+                typeIndex < 0 ||
+                (token & 0xFF000000U) != 0x08000000U ||
+                (token & 0x00FFFFFFU) == 0 ||
+                !strings.get(nameIndex)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     if (!allClaimed(claimedGenericContainers) ||
-        !allClaimed(claimedFields) ||
+        !validateUnclaimedFields() ||
         !allClaimed(claimedMethods) ||
-        !allClaimed(claimedParameters) ||
+        !validateUnclaimedParameters() ||
         !allClaimed(claimedProperties) ||
         !allClaimed(claimedEvents) ||
         !allClaimed(claimedNestedTypes) ||
@@ -1634,6 +1814,17 @@ MetadataParseResult parseSchema(
     return {std::move(model), MetadataParseError::None};
 }
 
+MetadataParseResult parseSchema(
+    const std::vector<std::uint8_t>& bytes,
+    const Schema* schema) {
+    const ByteView view(bytes);
+    Header header;
+    if (!parseHeader(view, *schema, view.size(), header)) {
+        return malformed(MetadataParseStage::Header);
+    }
+    return parseResolvedSchema(bytes, schema, header);
+}
+
 MetadataParseResult parseModel(
     std::vector<std::uint8_t> bytes,
     bool allowErasedMagic) {
@@ -1670,6 +1861,14 @@ MetadataParseResult parseModel(
         accepted = std::move(candidate);
         return true;
     };
+    if (const auto inference = inferComplementedCountedMetadata(bytes.data(), bytes.size())) {
+        versionSupported = true;
+        const auto schema = countedSchema(*inference);
+        const auto header = countedHeader(*inference);
+        if (!acceptCandidate(parseResolvedSchema(bytes, &schema, header))) {
+            return {nullptr, MetadataParseError::AmbiguousLayout};
+        }
+    }
     for (const auto& schema : kLegacySchemas) {
         if (schema.version != version) {
             continue;
@@ -1777,6 +1976,16 @@ std::optional<std::size_t> probeMetadataSize(
             acceptedSize = metadataSize;
             return true;
         };
+        if (const auto probe = probeComplementedCountedMetadata(
+                headerBytes.data(),
+                headerBytes.size(),
+                availableBytes)) {
+            versionSupported = true;
+            if (probe->metadataSize > MetadataModel::kMaximumMetadataBytes ||
+                !acceptSize(probe->metadataSize)) {
+                return std::nullopt;
+            }
+        }
         for (const auto& schema : kLegacySchemas) {
             if (schema.version != version) {
                 continue;
